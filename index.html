@@ -66,6 +66,12 @@
 
   .credit { right: 16px; bottom: calc(env(safe-area-inset-bottom, 0px) + 62px); margin: 0; font-size: 11px; color: var(--ink-soft); text-shadow: 0 1px 4px rgba(0,0,0,.6); }
   .credit a { color: inherit; }
+  .panel { left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 66px); width: min(460px, calc(100vw - 32px));
+           background: var(--glass-strong); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+           border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: grid; gap: 12px; }
+  .panel-h { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.1em; color: var(--ink-soft); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chips small { margin-left: 4px; font-size: 11px; opacity: 0.75; }
   #shot { position: fixed; z-index: 2; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 70px);
           transform: translateX(-50%); font-size: 13px; letter-spacing: 0.12em; color: var(--ink-soft);
           text-shadow: 0 1px 6px rgba(0,0,0,.5); opacity: 0; transition: opacity 1.5s ease; pointer-events: none; white-space: nowrap; }
@@ -95,6 +101,7 @@
     <p>つづいてる <b id="streak">0</b> 球 ・ 最高 <span id="best">0</span> 球</p>
   </div>
   <div class="tools">
+    <button id="btnPlay" type="button" aria-expanded="false" aria-controls="playPanel">投げ方・距離</button>
     <button id="btnSky" type="button">空：自動</button>
     <button id="btnSlow" type="button" aria-pressed="false">ゆっくり</button>
     <button id="btnSound" type="button" aria-pressed="false">音</button>
@@ -103,6 +110,10 @@
 </div>
 
 <p class="ui credit">人物モデル: <a href="https://github.com/microsoft/Microsoft-Rocketbox" target="_blank" rel="noopener">Microsoft Rocketbox</a>（MIT License, <a href="models/LICENSE-Rocketbox.txt" target="_blank" rel="noopener">全文</a>）</p>
+<div id="playPanel" class="ui panel" hidden>
+  <div><p class="panel-h">投げ方</p><div class="chips" id="styleChips"></div></div>
+  <div><p class="panel-h">ふたりの距離</p><div class="chips" id="distChips"></div></div>
+</div>
 <div class="ui bottom">
   <div class="cams" id="cams"></div>
 </div>
@@ -272,6 +283,7 @@ scene.add(sun, sun.target);
 
 // ---------- 地面 ----------
 const G_DARK = col(0x4a7334), G_BASE = col(0x6a9445), G_DRY = col(0xa0a95e), G_DIRT = col(0x8a7454);
+let DIST = 18;
 const SPOTS = [[-9, 0], [9, 0]];
 function wornAt(x, z) {
   let w = 0;
@@ -297,12 +309,16 @@ const detailTex = canvasTex(256, 256, (x, w, h) => {
 detailTex.wrapS = detailTex.wrapT = THREE.RepeatWrapping;
 detailTex.repeat.set(180, 180);
 detailTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const groundGeo = new THREE.PlaneGeometry(700, 700, 200, 200); groundGeo.rotateX(-Math.PI / 2);
+groundGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(groundGeo.attributes.position.count * 3), 3));
+function paintGround() {
+  const p = groundGeo.attributes.position, c = groundGeo.attributes.color, tc = new THREE.Color();
+  for (let i = 0; i < p.count; i++) { groundColor(p.getX(i), p.getZ(i), tc); c.setXYZ(i, tc.r, tc.g, tc.b); }
+  c.needsUpdate = true;
+}
+paintGround();
 {
-  const geo = new THREE.PlaneGeometry(700, 700, 200, 200); geo.rotateX(-Math.PI / 2);
-  const p = geo.attributes.position, c = new Float32Array(p.count * 3), tc = new THREE.Color();
-  for (let i = 0; i < p.count; i++) { groundColor(p.getX(i), p.getZ(i), tc); c[i * 3] = tc.r; c[i * 3 + 1] = tc.g; c[i * 3 + 2] = tc.b; }
-  geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
-  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: detailTex }));
+  const ground = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ vertexColors: true, map: detailTex }));
   ground.receiveShadow = true;
   scene.add(ground);
 }
@@ -330,29 +346,40 @@ function clumpGeo() {
   g.setIndex(idx);
   return g;
 }
+const grassSets = [];
 {
   const RG = 27;
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
   addWind(mat, 2.6, 2);
   const per = Math.ceil(Q.grass / 3);
-  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new V3(), p = new V3(), tc = new THREE.Color();
   for (let k = 0; k < 3; k++) {
     const im = new THREE.InstancedMesh(clumpGeo(), mat, per);
+    // 1株ごとに [x, z, 大きさ, 向き, 縦の伸び, 色の揺らぎ]
+    const data = new Float32Array(per * 6);
     for (let i = 0; i < per; i++) {
       const r = RG * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
-      p.set(Math.cos(a) * r, 0, Math.sin(a) * r);
-      const w = wornAt(p.x, p.z);
-      const sc = rand(0.8, 1.35) * (1 - smooth(0.82 * RG, RG, r)) * clamp(1 - w * 1.4, 0.05, 1);
-      q.setFromAxisAngle(THREE.Object3D.DefaultUp, Math.random() * Math.PI * 2);
-      s.set(sc, sc * rand(0.85, 1.2), sc);
-      im.setMatrixAt(i, m4.compose(p, q, s));
-      groundColor(p.x, p.z, tc).multiplyScalar(rand(0.9, 1.15));
-      im.setColorAt(i, tc);
+      data.set([Math.cos(a) * r, Math.sin(a) * r, rand(0.8, 1.35) * (1 - smooth(0.82 * RG, RG, r)), Math.random() * Math.PI * 2, rand(0.85, 1.2), rand(0.9, 1.15)], i * 6);
     }
     im.receiveShadow = true;
     scene.add(im);
+    grassSets.push({ im, data, per });
   }
 }
+function refreshGrass() {
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sv = new V3(), p = new V3(), tc = new THREE.Color();
+  grassSets.forEach(({ im, data, per }) => {
+    for (let i = 0; i < per; i++) {
+      const o = i * 6, x = data[o], z = data[o + 1];
+      const sc = data[o + 2] * clamp(1 - wornAt(x, z) * 1.4, 0.05, 1);
+      p.set(x, 0, z); q.setFromAxisAngle(THREE.Object3D.DefaultUp, data[o + 3]); sv.set(sc, sc * data[o + 4], sc);
+      im.setMatrixAt(i, m4.compose(p, q, sv));
+      im.setColorAt(i, groundColor(x, z, tc).multiplyScalar(data[o + 5]));
+    }
+    im.instanceMatrix.needsUpdate = true;
+    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+  });
+}
+refreshGrass();
 
 // ---------- 木 ----------
 const leafTex = canvasTex(512, 512, (x, w, h) => {
@@ -469,7 +496,7 @@ function ring(n, r0, r1, sc0, sc1, avoid) {
   return out;
 }
 {
-  const near = ring(44, 38, 64, 0.9, 1.35), far = ring(170, 68, 160, 1.0, 1.6), bush = ring(20, 17, 24, 0.8, 1.3, (x, z) => z < -9 && Math.abs(x + 5) < 4);
+  const near = ring(44, 38, 64, 0.9, 1.35), far = ring(170, 68, 160, 1.0, 1.6), bush = ring(20, 17, 24, 0.8, 1.3, (x, z) => (z < -9 && Math.abs(x + 5) < 4) || Math.abs(z) < 6);
   TREES.forEach((t, i) => {
     plant(t, leafMats[i], near.filter((_, k) => k % 4 === i), true);
     plant(t, leafMats[i], far.filter((_, k) => k % 4 === i), false);
@@ -556,18 +583,36 @@ const POSE = {
   R_REST: P(-0.23, -0.04, 0.06), L_REST: P(0.23, -0.04, 0.06),
   POLE_R: P(-0.4, -1, -0.35), POLE_L: P(0.5, -1, -0.25), KNEE: P(0, -0.15, 1)
 };
-const THROW = {
-  R: [[0, POSE.R_HOLD], [0.3, P(-0.27, 0.06, -0.08)], [0.52, P(-0.42, 0.63, -0.22)], [0.64, P(-0.28, 0.74, 0.27)], [0.82, P(0.12, 0.14, 0.42)], [1.5, POSE.R_READY]],
-  L: [[0, POSE.L_HOLD], [0.3, P(0.2, 0.45, 0.45)], [0.52, P(0.2, 0.55, 0.5)], [0.68, P(0.24, 0.22, 0.18)], [1.5, POSE.L_READY]],
-  poleR: [[0, POSE.POLE_R], [0.4, P(-1, -0.3, -0.3)], [0.64, P(-1, -0.15, 0.1)], [0.9, P(0, -1, 0.3)], [1.5, POSE.POLE_R]],
-  chestTwist: [[0, 0], [0.3, -0.35], [0.52, -0.85], [0.64, 0.25], [0.82, 0.45], [1.5, 0]],
-  hipsTwist: [[0, 0], [0.3, -0.25], [0.52, -0.45], [0.64, 0.12], [0.82, 0.25], [1.5, 0]],
-  lean: [[0, 0.05], [0.52, -0.04], [0.64, 0.24], [0.82, 0.38], [1.5, 0.1]],
-  drop: [[0, 0.03], [0.3, 0.02], [0.52, 0.08], [0.72, 0.11], [1.5, 0.05]],
-  footL: [[0, P(0.13, FOOT_Y, 0.03)], [0.28, P(0.12, 0.22, 0.12)], [0.5, P(0.15, FOOT_Y, 0.48)], [1.1, P(0.15, FOOT_Y, 0.48)], [1.5, P(0.15, FOOT_Y, 0.06)]],
-  footR: [[0, P(-0.13, FOOT_Y, -0.03)], [0.66, P(-0.13, FOOT_Y, -0.05)], [0.86, P(-0.1, 0.13, -0.02)], [1.5, P(-0.15, FOOT_Y, -0.02)]],
-  end: 1.5, release: 0.62
+// 投げ方ごとの腕の通り道（胸の座標系）。back=テイクバック、cock=踏み出し足の着地、lay=しなり、rel=リリース
+const ARM = {
+  over:  { back: P(-0.6, 0.3, -0.12), cock: P(-0.42, 0.76, -0.08), lay: P(-0.3, 0.68, -0.3), rel: P(-0.26, 0.92, 0.36), thru: P(-0.05, 0.4, 0.55), fin: P(0.28, -0.2, 0.35),
+           pCock: P(-1, -0.3, 0), pLay: P(-1, -0.1, 0.5), pRel: P(-1, -0.4, 0.1), roll: -0.4, lean: 0.05, drop: 0, speed: 1 },
+  tq:    { back: P(-0.6, 0.25, -0.15), cock: P(-0.52, 0.68, -0.1), lay: P(-0.45, 0.55, -0.3), rel: P(-0.52, 0.78, 0.34), thru: P(-0.15, 0.35, 0.55), fin: P(0.28, -0.2, 0.35),
+           pCock: P(-1, -0.4, 0), pLay: P(-1, -0.2, 0.5), pRel: P(-1, -0.5, 0.1), roll: -0.15, lean: 0, drop: 0.02, speed: 1 },
+  side:  { back: P(-0.6, 0.2, -0.2), cock: P(-0.62, 0.48, -0.12), lay: P(-0.58, 0.4, -0.32), rel: P(-0.62, 0.42, 0.36), thru: P(-0.2, 0.35, 0.6), fin: P(0.3, 0.1, 0.4),
+           pCock: P(0, -1, -0.2), pLay: P(0, -1, 0.6), pRel: P(0, -1, 0.2), roll: 0.15, lean: -0.1, drop: 0.06, speed: 0.95 },
+  under: { back: P(-0.55, 0.0, -0.25), cock: P(-0.55, 0.15, -0.2), lay: P(-0.5, 0.05, -0.32), rel: P(-0.42, -0.05, 0.42), thru: P(-0.1, 0.0, 0.55), fin: P(0.3, 0.0, 0.35),
+           pCock: P(0.2, -1, 0), pLay: P(0, -1, 0.5), pRel: P(0.3, -1, 0), roll: 0.55, lean: 0.25, drop: 0.18, speed: 0.88 }
 };
+// 体を横に向けて足を上げ、大きく踏み出し、腰→胸→腕の順に回して、前で放す
+function makeThrow(style, D) {
+  const A = ARM[style], k = 0.6 + 0.45 * smooth(8, 25, D), hop = D >= 30 ? 0.8 : 0, FY = FOOT_Y;
+  return {
+    R: [[0, POSE.R_HOLD], [0.35, P(-0.3, 0.15, -0.12)], [0.5, A.back], [0.62, A.cock], [0.7, A.lay], [0.76, A.rel], [0.86, A.thru], [1.05, A.fin], [1.6, POSE.R_READY]],
+    poleR: [[0, POSE.POLE_R], [0.5, P(-0.3, -1, -0.6)], [0.62, A.pCock], [0.7, A.pLay], [0.76, A.pRel], [0.9, P(0.2, -1, 0.4)], [1.6, POSE.POLE_R]],
+    L: [[0, POSE.L_HOLD], [0.35, P(0.3, 0.35, 0.3)], [0.55, P(0.55, 0.42, 0.15)], [0.66, P(0.45, 0.35, 0.25)], [0.76, P(0.15, 0.22, 0.28)], [0.95, P(0.15, 0.05, 0.25)], [1.6, POSE.L_READY]],
+    poleL: [[0, POSE.POLE_L], [0.55, P(0.2, -1, -0.3)], [0.76, POSE.POLE_L], [1.6, POSE.POLE_L]],
+    hipsTwist: [[0, 0], [0.35, -1.2], [0.62, -0.85], [0.72, -0.1], [0.85, 0.35], [1.2, 0.3], [1.6, 0]],
+    chestTwist: [[0, 0], [0.35, -0.25], [0.62, -0.55], [0.72, -0.25], [0.8, 0.3], [0.95, 0.45], [1.6, 0]],
+    lean: [[0, 0.05], [0.35, -0.02], [0.62, 0.12], [0.76, 0.42 + A.lean], [0.9, 0.58 + A.lean], [1.15, 0.3], [1.6, 0.08]],
+    roll: [[0, 0], [0.35, 0.05], [0.62, A.roll * 0.6], [0.76, A.roll], [0.95, A.roll * 0.5], [1.6, 0]],
+    drop: [[0, 0.03], [0.35, 0.0], [0.62, 0.13 + A.drop], [0.8, 0.13 + A.drop], [1.0, 0.07], [1.6, 0.04]],
+    hipsZ: [[0, 0], [0.35, -0.04], [0.62, 0.42 * k], [0.8, 0.62 * k], [1.0, 0.8 * k], [1.25, 0.95 * k], [1.6, k]],
+    footL: [[0, P(0.13, FY, 0.03)], [0.2, P(0.1, FY + 0.05, 0.0)], [0.35, P(0.02, 0.36, -0.02)], [0.5, P(0.05, 0.2, 0.5 * k)], [0.62, P(0.06, FY, k)], [1.6, P(0.12, FY, k)]],
+    footR: [[0, P(-0.13, FY, -0.03)], [0.3, P(-0.06, FY, 0.0)], [0.78, P(-0.06, FY + 0.06, 0.05)], [0.95, P(-0.1, 0.3, 0.2 * k)], [1.2, P(-0.16, FY, k)], [1.6, P(-0.15, FY, k)]],
+    hop, hopKeys: [[0, 0], [0.08, 0], [0.32, hop]], stride: k, end: 1.6, release: 0.76, speed: A.speed
+  };
+}
 const PICK = {
   drop: [[0, 0.04], [0.42, 0.42], [0.72, 0.42], [1.1, 0.04]],
   lean: [[0, 0.06], [0.42, 0.5], [0.72, 0.5], [1.1, 0.08]],
@@ -594,7 +639,7 @@ class Person {
     this.mode = 'ready'; this.throwT = 0; this.pickT = 0;
     this.walkPhase = 0; this.walkAmt = 0; this.speed = 1.6; this.moveDir = new V3(0, 0, 1); this.moving = false;
     this.jump = 0; this.hipsY = HIPS_Y; this.footOff = 0; this.model = null;
-    this.s = { lean: 0.06, drop: 0.03, hipsTwist: 0, chestTwist: 0, chestLean: 0 };
+    this.s = { lean: 0.06, drop: 0.03, hipsTwist: 0, chestTwist: 0, chestLean: 0, hipsZ: 0, chestRoll: 0 };
     this.hR = POSE.R_READY.clone(); this.hL = POSE.L_READY.clone();
     this.fL = P(0.15, FOOT_Y, 0.04); this.fR = P(-0.15, FOOT_Y, -0.02);
     this.gloveTarget = new V3(); this.lookTarget = new V3(0, 1.6, 0);
@@ -676,21 +721,34 @@ class Person {
   update(dt) {
     this._dt = dt;
     const m = this.mode, s = this.s;
-    let lean = 0.06, drop = 0.03, hipsTwist = 0, chestTwist = 0, chestLean = 0, instant = false, armRate = 7;
+    let lean = 0.06, drop = 0.03, hipsTwist = 0, chestTwist = 0, chestLean = 0, hipsZ = 0, chestRoll = 0, instant = false, armRate = 7;
     let hR = POSE.R_READY, hL = POSE.L_READY, wR = null, wL = null, poleR = POSE.POLE_R, poleL = POSE.POLE_L, twoHand = false;
     const fL = _fL.set(0.15, FOOT_Y, 0.05), fR = _fR.set(-0.15, FOOT_Y, -0.03);
     const walking = this.moving; this.moving = false;
     this.walkAmt += ((walking ? 1 : 0) - this.walkAmt) * damp(walking ? 10 : 6, dt);
 
     if (m === 'throw') {
-      const t = this.throwT;
-      hR = kf(THROW.R, t).clone(); hL = kf(THROW.L, t).clone(); poleR = kf(THROW.poleR, t).clone();
-      chestTwist = kf(THROW.chestTwist, t); hipsTwist = kf(THROW.hipsTwist, t);
-      lean = kf(THROW.lean, t); drop = kf(THROW.drop, t);
-      fL.copy(kf(THROW.footL, t)); fR.copy(kf(THROW.footR, t));
+      const K = this.throwKeys, t = this.throwT;
+      hR = kf(K.R, t).clone(); hL = kf(K.L, t).clone(); poleR = kf(K.poleR, t).clone(); poleL = kf(K.poleL, t).clone();
+      chestTwist = kf(K.chestTwist, t); hipsTwist = kf(K.hipsTwist, t);
+      lean = kf(K.lean, t); drop = kf(K.drop, t); hipsZ = kf(K.hipsZ, t); chestRoll = kf(K.roll, t);
+      fL.copy(kf(K.footL, t)); fR.copy(kf(K.footR, t));
+      const fx = Math.sin(this.throwYaw), fz = Math.cos(this.throwYaw);
+      if (K.hop) { // 遠投は投げる前に小さくステップ
+        const dh = kf(K.hopKeys, t + dt) - kf(K.hopKeys, t);
+        this.root.position.x += fx * dh; this.root.position.z += fz * dh;
+        const j = smooth(0.08, 0.18, t) * (1 - smooth(0.24, 0.34, t)) * 0.1; fL.y += j; fR.y += j;
+      }
+      this.targetYaw = this.throwYaw;
       instant = true;
       this.throwT += dt;
-      if (this.throwT > THROW.end) this.mode = 'ready';
+      if (this.throwT > K.end) {
+        // 踏み出した分だけ立ち位置を前へ移し、あとで元の場所へ歩いて戻る
+        const sh = K.stride;
+        this.root.position.x += fx * sh; this.root.position.z += fz * sh;
+        hipsZ -= sh; fL.z -= sh; fR.z -= sh;
+        this.mode = 'ready';
+      }
     } else if (m === 'ready') {
       hR = POSE.R_READY; hL = POSE.L_READY; lean = 0.16; drop = 0.07;
       fL.set(0.17, FOOT_Y, 0.07); fR.set(-0.17, FOOT_Y, -0.02);
@@ -741,14 +799,15 @@ class Person {
     s.lean += (lean - s.lean) * k; s.drop += (drop - s.drop) * k;
     s.hipsTwist += (hipsTwist - s.hipsTwist) * k; s.chestTwist += (chestTwist - s.chestTwist) * k;
     s.chestLean += (chestLean - s.chestLean) * k;
+    s.hipsZ += (hipsZ - s.hipsZ) * k; s.chestRoll += (chestRoll - s.chestRoll) * k;
 
     this.yaw += wrapAngle(this.targetYaw - this.yaw) * damp(6, dt);
     this.root.rotation.y = this.yaw;
     this.root.position.y = this.jump;
     const breathe = Math.sin(tt * 1.5 + this.sway) * 0.004;
-    this.hips.position.set(swayX, this.hipsY - s.drop - bob, 0);
+    this.hips.position.set(swayX, this.hipsY - s.drop - bob, s.hipsZ);
     this.hips.rotation.set(s.lean, s.hipsTwist, 0);
-    this.chest.rotation.set(s.chestLean + breathe, s.chestTwist - s.hipsTwist * 0.0, 0);
+    this.chest.rotation.set(s.chestLean + breathe, s.chestTwist, s.chestRoll);
     this.root.updateMatrixWorld(true);
 
     // 腕
@@ -773,7 +832,7 @@ class Person {
     // 首はボールや相手を見る
     this.chest.updateMatrixWorld(true);
     this.chest.worldToLocal(_c.copy(this.lookTarget)).sub(this.neck.position);
-    const hy = clamp(Math.atan2(_c.x, _c.z), -1.2, 1.2);
+    const hy = clamp(Math.atan2(_c.x, _c.z), -1.7, 1.7);
     const hp = clamp(Math.atan2(-(_c.y - 0.17), Math.hypot(_c.x, _c.z)) - s.lean - s.chestLean, -0.7, 0.7);
     this.headYaw += (hy - this.headYaw) * damp(7, dt);
     this.headPitch += (hp - this.headPitch) * damp(7, dt);
@@ -820,8 +879,8 @@ function retarget(p) {
   setWorldQ(M.b.head, _rq.copy(_mq3).multiply(M.rq.head));
   limbRet(M, M.armR, p.armR); limbRet(M, M.armL, p.armL);
   limbRet(M, M.legR, p.legR); limbRet(M, M.legL, p.legL);
-  setWorldQ(M.b.footR, _rq.copy(M.rootQ).multiply(M.rq.footR));
-  setWorldQ(M.b.footL, _rq.copy(M.rootQ).multiply(M.rq.footL));
+  _mq1.setFromAxisAngle(UP, p.s.hipsTwist * 0.75); setWorldQ(M.b.footR, _rq.copy(M.rootQ).multiply(_mq1).multiply(M.rq.footR));
+  _mq1.setFromAxisAngle(UP, p.s.hipsTwist * 0.4); setWorldQ(M.b.footL, _rq.copy(M.rootQ).multiply(_mq1).multiply(M.rq.footL));
 }
 const texLoader = new THREE.TextureLoader();
 function tex(url, srgb) { const t = texLoader.load(url); if (srgb) t.encoding = THREE.sRGBEncoding; t.anisotropy = 4; return t; }
@@ -1029,7 +1088,8 @@ function plan() {
 function release() {
   holdPoint(C.thrower, 'hand', C.p0);
   const dist = C.p0.distanceTo(C.target);
-  C.T = (dist / 15 + 0.1) * C.tMul;
+  const v = (13 + DIST * 0.35) * C.thrower.throwKeys.speed;   // 距離が長いほど強く投げる
+  C.T = (dist / v + 0.08) * C.tMul;
   // p(t) = p0 + v t + g t^2 / 2 が T 秒後に target を通る
   C.v0.copy(C.target).sub(C.p0).addScaledVector(GRAV, -0.5 * C.T * C.T).divideScalar(C.T);
   C.ft = 0; C.phase = 'flight';
@@ -1050,19 +1110,30 @@ function step(dt) {
   const th = C.thrower, ca = C.catcher;
   switch (C.phase) {
     case 'hold': {
-      th.mode = 'hold'; ca.mode = 'ready';
+      let ready = true;
       [th, ca].forEach(p => {
-        const d = p.walkTo(p.home, dt * 0.5, 0.02, false);
-        p.face(p === th ? ca.home : th.home);
+        const other = p === th ? ca : th;
+        if (p.mode === 'throw') { ready = false; return; }
+        const d = Math.hypot(p.home.x - p.root.position.x, p.home.z - p.root.position.z);
+        p.speed = 1.6;
+        if (d > 1.5) { p.mode = 'walk'; p.walkTo(p.home, dt, 0.02, true); ready = false; }   // 距離を変えたときは歩いて移動
+        else {
+          p.mode = p === th ? 'hold' : 'ready';
+          p.walkTo(p.home, dt * 0.5, 0.02, false); p.face(other.home);
+          if (d > 0.12) ready = false;
+        }
       });
       headOf(ca, th.lookTarget); headOf(th, ca.lookTarget);
-      if (C.t > C.holdTime) { plan(); C.phase = 'throw'; th.mode = 'throw'; th.throwT = 0; C.t = 0; }
+      if (C.t > C.holdTime && ready) {
+        plan(); C.phase = 'throw'; C.t = 0;
+        th.throwKeys = makeThrow(styleFor(th), DIST); th.throwYaw = th.targetYaw; th.mode = 'throw'; th.throwT = 0;
+      }
       break;
     }
     case 'throw': {
       ca.mode = 'ready';
       headOf(ca, th.lookTarget); headOf(th, ca.lookTarget);
-      if (th.throwT >= THROW.release) release();
+      if (th.throwT >= th.throwKeys.release) release();
       break;
     }
     case 'flight': {
@@ -1107,8 +1178,8 @@ function step(dt) {
     }
     case 'loose': {
       physics(dt);
-      th.mode = 'ready'; th.lookTarget.copy(ball.pos); ca.lookTarget.copy(ball.pos);
-      th.face(ball.pos);
+      if (th.mode !== 'throw') { th.mode = 'ready'; th.face(ball.pos); }
+      th.lookTarget.copy(ball.pos); ca.lookTarget.copy(ball.pos);
       if (C.t < 0.8) { ca.mode = 'ready'; ca.face(ball.pos); break; }
       ca.mode = 'walk';
       const d0 = Math.hypot(ball.pos.x - ca.root.position.x, ball.pos.z - ca.root.position.z);
@@ -1126,11 +1197,11 @@ function step(dt) {
     }
     case 'return': {
       ca.mode = 'walk'; ca.speed = 1.5;
-      th.lookTarget.copy(headOf(ca, tmpV)); th.face(ca.root.position);
+      th.lookTarget.copy(headOf(ca, tmpV)); if (th.mode !== 'throw') th.face(ca.root.position);
       ca.lookTarget.copy(headOf(th, tmpV));
       const d = ca.walkTo(ca.home, dt, 0.02);
       if (d < 0.05) {
-        ca.mode = 'hold'; ca.face(th.home); th.face(ca.home);
+        ca.mode = 'hold'; ca.face(th.home); if (th.mode !== 'throw') th.face(ca.home);
         if (Math.abs(wrapAngle(ca.targetYaw - ca.yaw)) < 0.05) swapRoles();
       }
       break;
@@ -1172,7 +1243,7 @@ function physics(dt) {
     if (sp < 0.04) v.set(0, 0, 0);
   }
   const r = Math.hypot(p.x, p.z);
-  if (r > 26) { p.x *= 26 / r; p.z *= 26 / r; v.set(0, 0, 0); }
+  if (r > 34) { p.x *= 34 / r; p.z *= 34 / r; v.set(0, 0, 0); }
 }
 
 // ---------- 時間帯（太陽の高さで光・空・霧・露出を決める） ----------
@@ -1241,15 +1312,15 @@ const SHOTS = {
   side:   { label: '横から', get: (t, o) => {
     // 画面の横幅に合わせて、ふたりが両端に入るところまで下がる
     const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect);
-    o.pos.set(Math.sin(t * 0.04) * 2, 1.55, Math.max(15, 10.5 / Math.tan(half))); o.look.set(0, 1.15, 0);
+    o.pos.set(Math.sin(t * 0.04) * 2, 1.55, Math.max(15, (DIST / 2 + 1.5) / Math.tan(half))); o.look.set(0, 1.15, 0);
   } },
   bench:  { label: 'ベンチから', get: (t, o) => { o.pos.set(-5, 1.12, -12.15); o.look.set(0.5, 1.1, 0); } },
   blue:   { label: '青のうしろ', get: (t, o) => { const p = blue.root.position; o.pos.set(p.x - 3.0, 1.72, p.z + 0.95); o.look.set(yellow.root.position.x, 1.15, yellow.root.position.z * 0.5); } },
   yellow: { label: 'ボーダーのうしろ', get: (t, o) => { const p = yellow.root.position; o.pos.set(p.x + 3.0, 1.72, p.z - 0.95); o.look.set(blue.root.position.x, 1.15, blue.root.position.z * 0.5); } },
   grass:  { label: '寝ころんで', get: (t, o) => { o.pos.set(1.5 + Math.sin(t * 0.03), 0.13, 5.5); o.look.set(0, 1.9, -2); } },
-  top:    { label: '真上から', get: (t, o) => { const a = t * 0.02; o.pos.set(Math.sin(a) * 2, 24, Math.cos(a) * 2); o.look.set(0, 0, 0); } },
+  top:    { label: '真上から', get: (t, o) => { const a = t * 0.02; o.pos.set(Math.sin(a) * 2, Math.max(24, DIST * 1.1), Math.cos(a) * 2); o.look.set(0, 0, 0); } },
   far:    { label: '遠くから', get: (t, o) => {
-    const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect), r = Math.max(30, 12 / Math.tan(half));
+    const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect), r = Math.max(30, DIST * 0.8 + 8, (DIST / 2 + 3) / Math.tan(half));
     const a = 2.3 + t * 0.012; o.pos.set(Math.cos(a) * r, 5, Math.sin(a) * r); o.look.set(0, 1, 0);
   } },
   ball:   { label: 'ボールを追う', fast: true, get: (t, o) => {
@@ -1437,6 +1508,54 @@ btnFull.addEventListener('click', () => {
   else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
 });
 
+// 投げ方と距離
+const SETTINGS = { style: 'auto', dist: 18 };
+try {
+  const st = localStorage.getItem('catchball.style'), ds = +localStorage.getItem('catchball.dist');
+  if (st && (st === 'auto' || ARM[st])) SETTINGS.style = st;
+  if ([10, 18, 30, 45].includes(ds)) SETTINGS.dist = ds;
+} catch (e) {}
+blue.natural = 'over'; yellow.natural = 'tq';
+function styleFor(p) { return SETTINGS.style === 'auto' ? p.natural : SETTINGS.style; }
+const STYLE_OPTS = [['auto', 'おまかせ', '青はオーバー・ボーダーはスリークォーター'], ['over', 'オーバースロー'], ['tq', 'スリークォーター'], ['side', 'サイドスロー'], ['under', 'アンダースロー']];
+const STYLE_SHORT = { auto: 'おまかせ', over: 'オーバー', tq: 'スリークォーター', side: 'サイド', under: 'アンダー' };
+const DIST_OPTS = [[10, '10m', '近く'], [18, '18m', 'ふつう'], [30, '30m', '遠め'], [45, '45m', '遠投']];
+const btnPlay = document.getElementById('btnPlay'), playPanel = document.getElementById('playPanel');
+function setDistance(D, instant) {
+  DIST = D;
+  blue.home.set(-D / 2, 0, 0); yellow.home.set(D / 2, 0, 0);
+  SPOTS[0][0] = -D / 2; SPOTS[1][0] = D / 2;
+  paintGround(); refreshGrass();
+  if (instant) [blue, yellow].forEach(p => p.root.position.copy(p.home));
+}
+function chipGroup(el, opts, current, onPick) {
+  el.innerHTML = '';
+  opts.forEach(([val, label, note]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.id = el.id + '-' + val;
+    b.textContent = label;
+    if (note) { const sm = document.createElement('small'); sm.textContent = note; b.appendChild(sm); }
+    b.setAttribute('aria-pressed', val === current ? 'true' : 'false');
+    b.addEventListener('click', () => { onPick(val); [...el.children].forEach(c => c.setAttribute('aria-pressed', c === b ? 'true' : 'false')); labelPlay(); });
+    el.appendChild(b);
+  });
+}
+function labelPlay() { btnPlay.textContent = `${STYLE_SHORT[SETTINGS.style]}・${SETTINGS.dist}m`; }
+chipGroup(document.getElementById('styleChips'), STYLE_OPTS, SETTINGS.style, v => {
+  SETTINGS.style = v; try { localStorage.setItem('catchball.style', v); } catch (e) {}
+  flashShot(v === 'auto' ? 'ふたりの得意な投げ方で' : STYLE_OPTS.find(o => o[0] === v)[1] + 'で投げます');
+});
+chipGroup(document.getElementById('distChips'), DIST_OPTS, SETTINGS.dist, v => {
+  SETTINGS.dist = v; try { localStorage.setItem('catchball.dist', v); } catch (e) {}
+  setDistance(v, false); flashShot(`ふたりの距離を${v}mにします`);
+});
+btnPlay.addEventListener('click', () => {
+  playPanel.hidden = !playPanel.hidden;
+  btnPlay.setAttribute('aria-expanded', playPanel.hidden ? 'false' : 'true');
+});
+setDistance(SETTINGS.dist, true);
+labelPlay();
+
 // 画面を消さない・UIを静かに隠す
 let wakeLock = null, keepAwakeWanted = false;
 function keepAwake() { if (wakeLock || !navigator.wakeLock) return; navigator.wakeLock.request('screen').then(l => { wakeLock = l; l.addEventListener('release', () => { wakeLock = null; }); }).catch(() => {}); }
@@ -1487,6 +1606,7 @@ function loop() {
   updateCamera(raw, simT);
   ambient(raw, simT);
 
+  if (!playPanel.hidden) idle = 0;
   idle += raw; if (idle > 5 && !document.body.classList.contains('calm')) document.body.classList.add('calm');
   renderer.render(scene, camera);
   if (++frames >= 3 && (modelsReady >= modelsWanted || simT > 20) && !loadDone) { loadDone = true; document.getElementById('loading').classList.add('done'); }
