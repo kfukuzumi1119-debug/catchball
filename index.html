@@ -618,7 +618,25 @@ const PICK = {
   lean: [[0, 0.06], [0.42, 0.5], [0.72, 0.5], [1.1, 0.08]],
   chest: [[0, 0], [0.42, 0.3], [0.72, 0.3], [1.1, 0]]
 };
-const kfTmp = new V3();
+const kfTmp = new V3(), kfM0 = new V3(), kfM1 = new V3();
+// 要所の姿勢を、途中で止まらない曲線でつなぐ（各要所での速さは前後の要所から決める。最初と最後だけ止まる）
+function kfs(keys, t) {
+  const n = keys.length;
+  if (t <= keys[0][0]) return keys[0][1];
+  if (t >= keys[n - 1][0]) return keys[n - 1][1];
+  let i = 1; while (keys[i][0] < t) i++;
+  const a = keys[i - 1], b = keys[i], h = b[0] - a[0], u = (t - a[0]) / h;
+  const h00 = 2 * u * u * u - 3 * u * u + 1, h10 = u * u * u - 2 * u * u + u, h01 = -2 * u * u * u + 3 * u * u, h11 = u * u * u - u * u;
+  const num = typeof a[1] === 'number';
+  const slope = (j, out) => {   // j 番目の要所での速さ（1秒あたり）
+    if (j === 0 || j === n - 1) return num ? 0 : out.set(0, 0, 0);
+    const p0 = keys[j - 1], p1 = keys[j + 1], dt = p1[0] - p0[0];
+    return num ? (p1[1] - p0[1]) / dt : out.copy(p1[1]).sub(p0[1]).divideScalar(dt);
+  };
+  if (num) return h00 * a[1] + h10 * h * slope(i - 1) + h01 * b[1] + h11 * h * slope(i);
+  slope(i - 1, kfM0); slope(i, kfM1);
+  return kfTmp.copy(a[1]).multiplyScalar(h00).addScaledVector(kfM0, h10 * h).addScaledVector(b[1], h01).addScaledVector(kfM1, h11 * h);
+}
 function kf(keys, t) {
   if (t <= keys[0][0]) return keys[0][1];
   for (let i = 1; i < keys.length; i++) {
@@ -671,7 +689,7 @@ class Person {
       const lower = new THREE.Group(); lower.position.y = -a; upper.add(lower);
       const end = new THREE.Group(); end.position.y = -b; lower.add(end);
       upperMeshes(upper); lowerMeshes(lower); endMeshes(end);
-      return { upper, lower, end, a, b };
+      return { upper, lower, end, a, b, poleW: new V3(0, -1, 0) };
     };
     const arm = (side, glove) => makeLimb(this.chest, P(side * 0.185, 0.46, 0), ARM_A, ARM_B,
       g => { add(g, limbGeo(0.13, 0.064, 0.058), mShirt); add(g, limbGeo(ARM_A, 0.045, 0.038), mSkin); },
@@ -733,9 +751,10 @@ class Person {
 
     if (m === 'throw') {
       const K = this.throwKeys, t = this.throwT;
-      hR = kf(K.R, t).clone(); hL = kf(K.L, t).clone(); poleR = kf(K.poleR, t).clone(); poleL = kf(K.poleL, t).clone();
-      chestTwist = kf(K.chestTwist, t); hipsTwist = kf(K.hipsTwist, t);
-      lean = kf(K.lean, t); drop = kf(K.drop, t); hipsZ = kf(K.hipsZ, t); chestRoll = kf(K.roll, t);
+      // 腕と体はなめらかな曲線で、足の着地だけは止まる動きでつなぐ
+      hR = kfs(K.R, t).clone(); hL = kfs(K.L, t).clone(); poleR = kfs(K.poleR, t).clone(); poleL = kfs(K.poleL, t).clone();
+      chestTwist = kfs(K.chestTwist, t); hipsTwist = kfs(K.hipsTwist, t);
+      lean = kfs(K.lean, t); drop = kfs(K.drop, t); hipsZ = kfs(K.hipsZ, t); chestRoll = kfs(K.roll, t);
       fL.copy(kf(K.footL, t)); fR.copy(kf(K.footR, t));
       const fx = Math.sin(this.throwYaw), fz = Math.cos(this.throwYaw);
       if (K.hop) { // 遠投は投げる前に小さくステップ
@@ -835,10 +854,14 @@ class Person {
     else { this.hL.lerp(tgtL, damp(armRate, dt)); this.hR.lerp(twoHand ? _hw1.copy(this.hL).add(_hw2.set(-0.09, -0.02, -0.03)) : tgtR, damp(armRate, dt)); }
     solve2(this.armR, this.hR, poleR);
     solve2(this.armL, this.hL, poleL);
+    this.chest.getWorldQuaternion(_q2);
+    this.armR.poleW.copy(poleR).applyQuaternion(_q2); this.armL.poleW.copy(poleL).applyQuaternion(_q2);
 
     // 脚（足先は地面、ひざは前へ）
     const fk = instant ? 1 : damp(this.walkAmt > 0.2 ? 60 : 22, dt);
     this.fL.lerp(fL, fk); this.fR.lerp(fR, fk);
+    this.hips.getWorldQuaternion(_q2);
+    this.legL.poleW.copy(POSE.KNEE).applyQuaternion(_q2); this.legR.poleW.copy(POSE.KNEE).applyQuaternion(_q2);
     [[this.legL, this.fL], [this.legR, this.fR]].forEach(([L, f]) => {
       _b.copy(f); this.root.localToWorld(_b); this.hips.worldToLocal(_b);
       solve2(L, _b.clone(), POSE.KNEE);
@@ -878,7 +901,9 @@ function limbRet(M, lim, drv) {
   const f = _mv4.subVectors(H, E).applyQuaternion(M.invRootQ).normalize();
   const d = E.sub(S).applyQuaternion(M.invRootQ).normalize();
   const b = _mv3.copy(f).addScaledVector(d, -d.dot(f));
-  const n = _mv1.crossVectors(d, b).addScaledVector(_mv5.crossVectors(d, lim.b0), 0.04);
+  // 曲げた向き（d×b）に、ひじを向ける方向（pole×d）を足す。腕が伸びきっても後者が効くのでぶれない
+  const pole = _mv5.copy(drv.poleW).applyQuaternion(M.invRootQ);
+  const n = _mv1.crossVectors(d, b).addScaledVector(pole.cross(d), 0.3);
   if (n.lengthSq() < 1e-8) n.copy(lim.lastN);
   n.normalize(); lim.lastN.copy(n);
   frameQ(d, n, _fq); setWorldQ(lim.u, _rq.copy(M.rootQ).multiply(_fq).multiply(lim.ku));
