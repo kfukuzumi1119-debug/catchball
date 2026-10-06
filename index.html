@@ -637,7 +637,7 @@ class Person {
     this.root = new THREE.Group(); this.root.position.copy(home);
     this.yaw = 0; this.targetYaw = 0;
     this.mode = 'ready'; this.throwT = 0; this.pickT = 0;
-    this.walkPhase = 0; this.walkAmt = 0; this.speed = 1.6; this.moveDir = new V3(0, 0, 1); this.moving = false;
+    this.walkPhase = 0; this.walkAmt = 0; this.speed = 1.6; this.curSpeed = 0; this.moveDir = new V3(0, 0, 1); this.moving = false;
     this.jump = 0; this.hipsY = HIPS_Y; this.footOff = 0; this.model = null;
     this.s = { lean: 0.06, drop: 0.03, hipsTwist: 0, chestTwist: 0, chestLean: 0, hipsZ: 0, chestRoll: 0 };
     this.hR = POSE.R_READY.clone(); this.hL = POSE.L_READY.clone();
@@ -703,18 +703,19 @@ class Person {
     const c = Math.cos(this.yaw), s = Math.sin(this.yaw);
     const l = Math.hypot(dx, dz) || 1;
     this.moveDir.set((dx * c - dz * s) / l, 0, (dx * s + dz * c) / l);
-    const S = clamp(0.24 * speed, 0.12, 0.42);
-    this.walkPhase += Math.PI * speed / (2 * S) * this._dt;
     this.speedNow = speed; this.moving = true;
   }
-  walkTo(target, dt, stopAt = 0.03, faceIt = true) {
+  walkTo(target, dt, stopAt = 0.03, faceIt = true, speedMul = 1) {
     const p = this.root.position;
     const dx = target.x - p.x, dz = target.z - p.z, d = Math.hypot(dx, dz);
     if (d > stopAt) {
-      const step = Math.min(this.speed * dt, d - stopAt);
+      // 走り出しは加速し、着く前は減速する
+      const want = Math.min(this.speed * speedMul, Math.sqrt(2 * 3.5 * (d - stopAt)) + 0.25);
+      this.curSpeed += clamp(want - this.curSpeed, -9 * dt, 4.5 * dt);
+      const step = Math.min(Math.max(this.curSpeed, 0.2) * dt, d - stopAt);
       p.x += dx / d * step; p.z += dz / d * step;
       if (faceIt) this.targetYaw = Math.atan2(dx, dz);
-      this._dt = dt; this.setMove(dx, dz, step / Math.max(dt, 1e-4));
+      this.setMove(dx, dz, step / Math.max(dt, 1e-4));
     }
     return d;
   }
@@ -726,6 +727,9 @@ class Person {
     const fL = _fL.set(0.15, FOOT_Y, 0.05), fR = _fR.set(-0.15, FOOT_Y, -0.03);
     const walking = this.moving; this.moving = false;
     this.walkAmt += ((walking ? 1 : 0) - this.walkAmt) * damp(walking ? 10 : 6, dt);
+    if (!walking) this.curSpeed = Math.max(0, this.curSpeed - 9 * dt);
+    const v = this.speedNow || 0, run = smooth(1.9, 2.6, v) * this.walkAmt;
+    const sw = Math.cos(this.walkPhase) * this.walkAmt;   // 左足が前のとき+1（右腕が前）
 
     if (m === 'throw') {
       const K = this.throwKeys, t = this.throwT;
@@ -768,27 +772,41 @@ class Person {
       hL = P(0.2, 0.05, 0.25);
       this.pickT += dt;
     } else if (m === 'walk') {
-      const sw = Math.sin(this.walkPhase) * this.walkAmt;
-      hR = _hw1.set(-0.22, -0.02 + Math.abs(sw) * 0.03, 0.06 + 0.2 * sw);
-      hL = _hw2.set(0.22, -0.02 + Math.abs(sw) * 0.03, 0.06 - 0.2 * sw);
-      poleR = _pw.set(-0.3, -0.5, -1);
-      lean = 0.05 + 0.08 * clamp((this.speedNow || 0) / 2.8, 0, 1);
-      armRate = 14;
+      // 歩きは腕を伸ばして軽く振り、走りはひじを90度に曲げて大きく振る
+      hR = _hw1.set(-0.22, -0.02 + Math.abs(sw) * 0.03, 0.06 + 0.2 * sw).lerp(_hw3.set(-0.19, 0.1 + 0.09 * sw, 0.1 + 0.26 * sw), run);
+      hL = _hw2.set(0.22, -0.02 + Math.abs(sw) * 0.03, 0.06 - 0.2 * sw).lerp(_hw3.set(0.19, 0.1 - 0.09 * sw, 0.1 - 0.26 * sw), run);
+      poleR = _pw.set(-0.3, -0.5, -1).lerp(_hw3.set(-0.45, -0.3, -1), run);
+      poleL = _pw2.set(0.3, -0.5, -1).lerp(_hw3.set(0.45, -0.3, -1), run);
+      lean = (0.05 + 0.3 * run) * this.moveDir.z;   // 進む向きへ体を倒す（後ろ歩きは少し後ろへ）
+      chestTwist = 0.12 * sw * (0.5 + run); hipsTwist = -0.07 * sw;
+      armRate = 14 + 10 * run;
     } else { // idle
       hR = POSE.R_REST; hL = POSE.L_REST;
     }
 
     // 歩く足の運び（足は地面に置き、上がるのは前に出す間だけ）
+    // 接地中の足は地面に止め、離れている間に前へ運ぶ。速いほど接地が短くなり、両足が浮く瞬間ができる（走り）
     let bob = 0;
     if (this.walkAmt > 0.01) {
-      const S = clamp(0.24 * (this.speedNow || 1), 0.12, 0.42) * this.walkAmt, d = this.moveDir;
+      const S = (0.22 * clamp(v, 0.5, 1.9) + 0.05) * (1 - run) + (0.36 + 0.04 * clamp(v - 2.6, 0, 1)) * run;  // 半歩の長さ
+      const beta = 0.62 - 0.24 * run;                                   // 接地している割合
+      if (walking) this.walkPhase += Math.PI * Math.max(v, 0.4) * beta / S * dt;   // 足が滑らない速さ
+      const d = this.moveDir, A = this.walkAmt;
+      let stanceDip = 0;
       [[fL, this.walkPhase], [fR, this.walkPhase + Math.PI]].forEach(([f, ph]) => {
-        const sn = Math.sin(ph);
-        f.x += d.x * S * sn; f.z += d.z * S * sn;
-        f.y += Math.max(0, Math.cos(ph)) * 0.11 * this.walkAmt;
+        const u = ((ph / (2 * Math.PI)) % 1 + 1) % 1;
+        let along, lift = 0;
+        if (u < beta) { const w = u / beta; along = S * (1 - 2 * w); stanceDip = Math.max(stanceDip, Math.sin(Math.PI * w)); }
+        else {
+          const w = (u - beta) / (1 - beta), e = w * w * (3 - 2 * w);
+          along = -S + 2 * S * e;
+          // 走りは、けり出したかかとをお尻のほうへ高く引き上げてから前へ
+          lift = Math.sin(Math.PI * w) * (0.1 + 0.05 * run) + run * 0.3 * Math.sin(Math.PI * Math.min(1, w * 1.7)) * (1 - w);
+        }
+        f.x += d.x * along * A; f.z += d.z * along * A; f.y += lift * A;
       });
-      bob = (0.025 + 0.02 * this.walkAmt) * Math.abs(Math.cos(this.walkPhase)) * this.walkAmt;
-      drop += 0.03 * this.walkAmt;
+      bob = A * ((1 - run) * 0.03 * stanceDip + run * (0.07 * stanceDip - 0.03));
+      drop += A * (0.02 + 0.06 * run);
     }
     fL.y += this.footOff; fR.y += this.footOff;
     // 立っている間のわずかな重心移動
@@ -819,7 +837,7 @@ class Person {
     solve2(this.armL, this.hL, poleL);
 
     // 脚（足先は地面、ひざは前へ）
-    const fk = instant ? 1 : damp(22, dt);
+    const fk = instant ? 1 : damp(this.walkAmt > 0.2 ? 60 : 22, dt);
     this.fL.lerp(fL, fk); this.fR.lerp(fR, fk);
     [[this.legL, this.fL], [this.legR, this.fR]].forEach(([L, f]) => {
       _b.copy(f); this.root.localToWorld(_b); this.hips.worldToLocal(_b);
@@ -841,7 +859,7 @@ class Person {
     if (this.model) retarget(this);
   }
 }
-const _fL = new V3(), _fR = new V3(), _hw1 = new V3(), _hw2 = new V3(), _pw = new V3();
+const _fL = new V3(), _fR = new V3(), _hw1 = new V3(), _hw2 = new V3(), _hw3 = new V3(), _pw = new V3(), _pw2 = new V3();
 
 const blue = new Person({ home: new V3(-9, 0, 0), shirt: 0x3f6e9e, pants: 0x2d374a, cap: 0x23324a, skin: 0xe2b48f, hair: 0x2a1f18, shoe: 0x2b2b2e });
 const yellow = new Person({ home: new V3(9, 0, 0), shirt: 0xe6e2d8, pants: 0xb9a57c, cap: 0x2a3550, skin: 0xe2b48f, hair: 0x3a2a1c, shoe: 0x8c8f94 });
@@ -1116,10 +1134,10 @@ function step(dt) {
         if (p.mode === 'throw') { ready = false; return; }
         const d = Math.hypot(p.home.x - p.root.position.x, p.home.z - p.root.position.z);
         p.speed = 1.6;
-        if (d > 1.5) { p.mode = 'walk'; p.walkTo(p.home, dt, 0.02, true); ready = false; }   // 距離を変えたときは歩いて移動
+        if (d > 1.5) { p.mode = 'walk'; p.speed = d > 4 ? 2.7 : 1.6; p.walkTo(p.home, dt, 0.02, true); ready = false; }   // 距離を変えたときは、遠ければ走って移動
         else {
           p.mode = p === th ? 'hold' : 'ready';
-          p.walkTo(p.home, dt * 0.5, 0.02, false); p.face(other.home);
+          p.walkTo(p.home, dt, 0.02, false, 0.5); p.face(other.home);
           if (d > 0.12) ready = false;
         }
       });
@@ -1148,7 +1166,7 @@ function step(dt) {
       const p = ca.root.position;
       const nx = C.caStart.x + (C.side.x - C.caStart.x) * k, nz = C.caStart.z + (C.side.z - C.caStart.z) * k;
       const mdx = nx - p.x, mdz = nz - p.z, md = Math.hypot(mdx, mdz);
-      if (md > 1e-4) { ca._dt = dt; ca.setMove(mdx, mdz, Math.max(md / dt, 0.6)); }
+      if (md > 1e-4) ca.setMove(mdx, mdz, Math.max(md / dt, 0.6));
       p.x = nx; p.z = nz;
       ca.face(C.p0);
       if (C.kind === 'high') { const j = (C.ft - (C.T - 0.45)) / 0.45; ca.jump = j > 0 && j < 1 ? Math.sin(j * Math.PI) * 0.3 : 0; }
@@ -1170,7 +1188,7 @@ function step(dt) {
       ca.mode = C.t < 0.4 ? 'reach' : 'hold';
       if (C.t < 0.4) ca.gloveTarget.copy(C.target).addScaledVector(frame(ca, th).f, -0.06 * smooth(0, 0.15, C.t));
       if (C.t > 0.75 && ball.where === 'glove') attachBall(ca, 'hand');
-      if (C.t > 0.4) ca.walkTo(ca.home, dt * 0.45, 0.02, false);
+      if (C.t > 0.4) ca.walkTo(ca.home, dt, 0.02, false, 0.45);
       ca.face(th.home);
       th.lookTarget.copy(ball.pos); headOf(th, ca.lookTarget);
       if (C.t > 1.2) swapRoles();
@@ -1196,7 +1214,8 @@ function step(dt) {
       break;
     }
     case 'return': {
-      ca.mode = 'walk'; ca.speed = 1.5;
+      ca.mode = 'walk';
+      ca.speed = Math.hypot(ca.home.x - ca.root.position.x, ca.home.z - ca.root.position.z) > 6 ? 2.6 : 1.5;
       th.lookTarget.copy(headOf(ca, tmpV)); if (th.mode !== 'throw') th.face(ca.root.position);
       ca.lookTarget.copy(headOf(th, tmpV));
       const d = ca.walkTo(ca.home, dt, 0.02);
@@ -1210,7 +1229,7 @@ function step(dt) {
   // その場で向きを変えるときは小さく足踏み
   [blue, yellow].forEach(p => {
     const turn = Math.abs(wrapAngle(p.targetYaw - p.yaw));
-    if (!p.moving && turn > 0.25 && p.mode !== 'throw' && p.mode !== 'pickup') { p._dt = dt; p.setMove(0, 1, 0.5); p.moveDir.set(0, 0, 0.3); }
+    if (!p.moving && turn > 0.25 && p.mode !== 'throw' && p.mode !== 'pickup') { p.setMove(0, 1, 0.5); p.moveDir.set(0, 0, 0.3); }
   });
   blue.update(dt); yellow.update(dt);
 }
