@@ -1236,15 +1236,22 @@ function applyTod(dt, instant) {
 }
 
 // ---------- カメラ ----------
-const look = new V3(0, 1.2, 0), camPos = new V3(0, 1.6, 13);
+const look = new V3(0, 1.2, 0), camPos = new V3(0, 1.6, 20);
 const SHOTS = {
-  side:   { label: '横から', get: (t, o) => { o.pos.set(Math.sin(t * 0.04) * 3, 1.55, 13); o.look.set(0, 1.15, 0); } },
+  side:   { label: '横から', get: (t, o) => {
+    // 画面の横幅に合わせて、ふたりが両端に入るところまで下がる
+    const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect);
+    o.pos.set(Math.sin(t * 0.04) * 2, 1.55, Math.max(15, 10.5 / Math.tan(half))); o.look.set(0, 1.15, 0);
+  } },
   bench:  { label: 'ベンチから', get: (t, o) => { o.pos.set(-5, 1.12, -12.15); o.look.set(0.5, 1.1, 0); } },
   blue:   { label: '青のうしろ', get: (t, o) => { const p = blue.root.position; o.pos.set(p.x - 3.0, 1.72, p.z + 0.95); o.look.set(yellow.root.position.x, 1.15, yellow.root.position.z * 0.5); } },
   yellow: { label: 'ボーダーのうしろ', get: (t, o) => { const p = yellow.root.position; o.pos.set(p.x + 3.0, 1.72, p.z - 0.95); o.look.set(blue.root.position.x, 1.15, blue.root.position.z * 0.5); } },
   grass:  { label: '寝ころんで', get: (t, o) => { o.pos.set(1.5 + Math.sin(t * 0.03), 0.13, 5.5); o.look.set(0, 1.9, -2); } },
   top:    { label: '真上から', get: (t, o) => { const a = t * 0.02; o.pos.set(Math.sin(a) * 2, 24, Math.cos(a) * 2); o.look.set(0, 0, 0); } },
-  far:    { label: '遠くから', get: (t, o) => { const a = 2.3 + t * 0.012; o.pos.set(Math.cos(a) * 30, 5, Math.sin(a) * 30); o.look.set(0, 1, 0); } },
+  far:    { label: '遠くから', get: (t, o) => {
+    const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect), r = Math.max(30, 12 / Math.tan(half));
+    const a = 2.3 + t * 0.012; o.pos.set(Math.cos(a) * r, 5, Math.sin(a) * r); o.look.set(0, 1, 0);
+  } },
   ball:   { label: 'ボールを追う', fast: true, get: (t, o) => {
     if (ball.free && !ball.onGround && ball.vel.lengthSq() > 4) {
       _d.copy(ball.vel).setY(0).normalize();
