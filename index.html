@@ -80,6 +80,21 @@
           font-size: 14px; color: var(--ink); background: var(--glass); padding: 10px 18px; border-radius: 999px;
           transition: opacity 2s ease; pointer-events: none; text-align: center; }
   #hint.gone { opacity: 0; }
+  #gameHud { position: fixed; z-index: 2; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 74px);
+             background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+             border-radius: 999px; padding: 6px 14px; font-size: 13px; color: var(--ink-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #gameHud b { color: var(--leather); font-size: 15px; }
+  #judge { position: fixed; z-index: 2; left: 50%; top: 32%; transform: translate(-50%, -50%) scale(0.92); font-size: 30px; font-weight: 700;
+           letter-spacing: 0.06em; color: var(--ink); text-shadow: 0 2px 12px rgba(0,0,0,.55); opacity: 0; pointer-events: none;
+           transition: opacity .35s ease, transform .35s ease; white-space: nowrap; }
+  #judge.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #gameHint { position: fixed; z-index: 2; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 112px);
+              background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+              border-radius: 999px; padding: 7px 14px; font-size: 13px; white-space: nowrap; pointer-events: none; }
+  #ring { position: fixed; z-index: 2; left: 0; top: 0; width: 64px; height: 64px; margin: -32px 0 0 -32px; pointer-events: none; }
+  #ring::before { content: ''; position: absolute; inset: 22px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.9); }
+  #ring i { position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--leather); transform: scale(var(--s, 2)); }
+  @media (prefers-reduced-motion: reduce) { #judge { transition: opacity .2s ease; } }
   #loading { position: fixed; inset: 0; z-index: 3; display: grid; place-items: center; background: #1c2a22;
              font-size: 14px; letter-spacing: 0.1em; color: var(--ink-soft); transition: opacity 1.2s ease; }
   #loading.done { opacity: 0; pointer-events: none; }
@@ -118,7 +133,11 @@
   <div class="cams" id="cams"></div>
 </div>
 <div id="shot"></div>
-<div id="hint">ドラッグで好きな角度に ・ しばらく触らないと表示が消えます</div>
+<div id="hint">青にボールが来たらタップでキャッチ ・ 青が持っているときは上にはじいて投げる<br>ドラッグで好きな角度に</div>
+<div id="gameHud" hidden>あそび中 ・ 得点 <b id="gScore">0</b> ・ 最高 <span id="gBest">0</span></div>
+<div id="judge" aria-live="polite"></div>
+<div id="gameHint" hidden></div>
+<div id="ring" hidden><i></i></div>
 <div id="loading">ふたりを呼んでいます…</div>
 <div id="err" hidden>3D表示に対応していないブラウザのようです。<br>Chrome や Safari の最新版で開いてみてください。</div>
 
@@ -926,7 +945,13 @@ function retarget(p) {
   _mq1.setFromAxisAngle(UP, p.s.hipsTwist * 0.4); setWorldQ(M.b.footL, _rq.copy(M.rootQ).multiply(_mq1).multiply(M.rq.footL));
 }
 const texLoader = new THREE.TextureLoader();
-function tex(url, srgb) { const t = texLoader.load(url); if (srgb) t.encoding = THREE.sRGBEncoding; t.anisotropy = 4; return t; }
+let texPending = 0;   // 読み込み中の画像の数（全部そろうまで「呼んでいます」を出しておく）
+function tex(url, srgb) {
+  texPending++;
+  const done = () => { texPending--; };
+  const t = texLoader.load(url, done, undefined, done);
+  if (srgb) t.encoding = THREE.sRGBEncoding; t.anisotropy = 4; return t;
+}
 const gloveMat = std(0x8a4e24, { roughness: 0.5 }), laceMat = std(0x5a3418, { roughness: 0.7 });
 function makeGlove() {
   const g = new THREE.Group();
@@ -1128,7 +1153,31 @@ function plan() {
   }
   C.tMul = tMul;
 }
+// プレイヤーがはじいた向きと強さから、ねらう場所を決める（lat: 相手から見た左右 m、y: 高さ m）
+function planFromPlayer(lat, y) {
+  const ca = C.catcher, th = C.thrower;
+  const { f, left } = frame(ca, th);
+  C.tMul = 1; C.strike = false;
+  if (Math.abs(lat) <= 1.0 && y >= 0.5 && y <= 2.2) {
+    C.kind = 'catch'; C.willCatch = true; C.strike = Math.abs(lat) < 0.35 && Math.abs(y - 1.35) < 0.3;
+    C.side.copy(ca.home).addScaledVector(left, clamp(lat * 0.6, -0.55, 0.55));
+    C.target.copy(ca.home).addScaledVector(left, lat).addScaledVector(f, 0.45); C.target.y = y;
+  } else if (y < 0.5) {
+    C.kind = 'short'; C.willCatch = false;
+    C.target.copy(ca.home).addScaledVector(f, clamp(1.5 + (0.5 - y) * 3, 1.5, 6)).addScaledVector(left, lat); C.target.y = BALL_R;
+    C.side.copy(ca.home).addScaledVector(f, 0.3);
+  } else if (y > 2.2) {
+    C.kind = 'high'; C.willCatch = false; C.tMul = 1.1;
+    C.target.copy(ca.home).addScaledVector(left, lat); C.target.y = Math.min(y + 0.6, 4.2);
+    C.side.copy(ca.home);
+  } else {
+    C.kind = 'wide'; C.willCatch = false;
+    C.target.copy(ca.home).addScaledVector(left, lat).addScaledVector(f, 0.3); C.target.y = y;
+    C.side.copy(ca.home).addScaledVector(left, Math.sign(lat) * 0.75);
+  }
+}
 function release() {
+  C.playerTapT = null; C.fumble = false;
   holdPoint(C.thrower, 'hand', C.p0);
   const dist = C.p0.distanceTo(C.target);
   const v = (13 + DIST * 0.35) * C.thrower.throwKeys.speed;   // 距離が長いほど強く投げる
@@ -1167,8 +1216,12 @@ function step(dt) {
         }
       });
       headOf(ca, th.lookTarget); headOf(th, ca.lookTarget);
-      if (C.t > C.holdTime && ready) {
-        plan(); C.phase = 'throw'; C.t = 0;
+      // 遊んでいる間、青はプレイヤーが投げるのを待つ（12秒なにもなければ自動で投げる）
+      const waitT = th === blue && gameActive() ? 12 : C.holdTime;
+      if (ready && ((th === blue && game.pending) || C.t > waitT)) {
+        if (th === blue && game.pending) { planFromPlayer(game.pending.lat, game.pending.y); C.fromPlayer = true; game.pending = null; }
+        else { plan(); C.fromPlayer = false; }
+        C.phase = 'throw'; C.t = 0;
         th.throwKeys = makeThrow(styleFor(th), DIST); th.throwYaw = th.targetYaw; th.mode = 'throw'; th.throwT = 0;
       }
       break;
@@ -1185,7 +1238,9 @@ function step(dt) {
       ball.pos.copy(C.p0).addScaledVector(C.v0, t).addScaledVector(GRAV, 0.5 * t * t);
       ball.vel.copy(C.v0).addScaledVector(GRAV, t);
       const u = C.ft / C.T;
-      ca.mode = u > 0.3 ? 'reach' : 'ready';
+      // 遊んでいる間の青は、タップしてからグラブを出す
+      const waitTap = ca === blue && gameActive() && C.playerTapT == null;
+      ca.mode = u > 0.3 && !waitTap ? 'reach' : 'ready';
       ca.gloveTarget.copy(C.target);
       const k = smooth(0.1, 0.75, u);
       const p = ca.root.position;
@@ -1198,12 +1253,28 @@ function step(dt) {
       th.lookTarget.copy(ball.pos); ca.lookTarget.copy(ball.pos);
       if (C.ft >= C.T) {
         ca.jump = 0;
-        if (C.willCatch) {
+        let caught = C.willCatch;
+        if (ca === blue && (gameActive() || C.playerTapT != null)) {
+          const tap = C.playerTapT;
+          if (!C.willCatch) { if (tap != null) judge('とどかない…'); }
+          else if (tap == null) { caught = false; judge('見送り'); }
+          else {
+            const early = C.T - tap;   // 届く何秒前にタップしたか
+            if (early <= 0.15) { judge('ナイスキャッチ！ +2'); addScore(2); }
+            else if (early <= 0.32) { judge('キャッチ +1'); addScore(1); }
+            else { caught = false; C.fumble = true; judge('早い！'); }
+          }
+        } else if (C.fromPlayer && ca === yellow) {
+          if (caught) { judge(C.strike ? 'ストライク！ +3' : 'ナイスボール +1'); addScore(C.strike ? 3 : 1); }
+          else judge(C.kind === 'high' ? '高すぎ！' : C.kind === 'short' ? 'ワンバウンド' : 'それた…');
+        }
+        if (caught) {
           attachBall(ca, 'glove'); C.phase = 'caught'; C.t = 0;
           tally.streak++; if (tally.streak > tally.best) { tally.best = tally.streak; try { localStorage.setItem('catchball.best', tally.best); } catch (e) {} }
           showTally(); playPop(ball.pos);
         } else {
           C.phase = 'loose'; C.t = 0; ball.onGround = false;
+          if (C.fumble) { ball.vel.set(-ball.vel.x * 0.12 + rand(-0.8, 0.8), 2.2, -ball.vel.z * 0.12 + rand(-0.8, 0.8)); playBounce(4, ball.pos); }   // グラブではじく
           if (tally.streak > 0) { tally.streak = 0; showTally(); }
         }
       }
@@ -1422,8 +1493,8 @@ function updateCamera(dt, t) {
     if (cam.mode === 'auto') {
       cam.autoT += dt;
       if (cam.autoT > 16) { cam.autoT = 0; cam.autoIdx = (cam.autoIdx + 1) % AUTO_ORDER.length; flashShot(SHOTS[AUTO_ORDER[cam.autoIdx]].label); }
-      key = AUTO_ORDER[cam.autoIdx];
-      rate = 0.9;
+      key = gameActive() ? 'blue' : AUTO_ORDER[cam.autoIdx];
+      rate = gameActive() ? 1.6 : 0.9;
     }
     SHOTS[key].get(t, shotOut);
     if (SHOTS[key].fast) rate = 3.2;
@@ -1437,17 +1508,82 @@ function updateCamera(dt, t) {
   camera.lookAt(look);
 }
 
+// ---------- ゲーム（青になって、捕る・投げる） ----------
+const game = { last: -1e9, score: 0, best: 0, pending: null, wasActive: false, hintText: '' };
+try { game.best = +localStorage.getItem('catchball.gameBest') || 0; } catch (e) {}
+const gHud = document.getElementById('gameHud'), gScore = document.getElementById('gScore'), gBest = document.getElementById('gBest');
+const judgeEl = document.getElementById('judge'), gHint = document.getElementById('gameHint');
+const ringEl = document.getElementById('ring'), ringI = ringEl.querySelector('i'), ringV = new V3();
+gBest.textContent = game.best;
+const nowS = () => performance.now() / 1000;
+function gameActive() { return nowS() - game.last < 40; }   // 40秒なにもしなければ、眺めるだけに戻る
+function touchGame() {
+  if (!gameActive()) { game.score = 0; gScore.textContent = 0; flashShot('青になって遊べます'); }
+  game.last = nowS();
+}
+let judgeTimer;
+function judge(text) {
+  judgeEl.textContent = text; judgeEl.classList.add('show');
+  clearTimeout(judgeTimer); judgeTimer = setTimeout(() => judgeEl.classList.remove('show'), 1400);
+}
+function addScore(n) {
+  game.score += n; gScore.textContent = game.score;
+  if (game.score > game.best) { game.best = game.score; gBest.textContent = game.best; try { localStorage.setItem('catchball.gameBest', game.best); } catch (e) {} }
+}
+function canThrow() { return C.thrower === blue && C.phase === 'hold' && blue.mode !== 'throw' && !game.pending; }
+function tryCatchTap() {
+  if (C.phase === 'flight' && C.catcher === blue) { if (C.playerTapT == null) C.playerTapT = C.ft; touchGame(); return true; }
+  if (C.phase === 'loose' && C.catcher === blue && C.t < 0.5 && gameActive()) { judge('おそい！'); touchGame(); return true; }
+  return false;
+}
+// dxN: 画面の横幅の半分に対する横の量（-1〜1）、vn: はじく速さ（画面の高さ／秒）
+function playerThrow(dxN, vn) {
+  touchGame();
+  camera.getWorldDirection(_d);
+  const rx = -_d.z, rz = _d.x, rl = Math.hypot(rx, rz) || 1;   // 画面の右方向（地面の上）
+  const { left } = frame(yellow, blue);
+  const side = (rx * left.x + rz * left.z) / rl;
+  game.pending = { lat: dxN * 3.2 * side, y: 1.35 + (vn - 2.2) * 0.9 };
+}
+function updateGameUI() {
+  const act = gameActive();
+  if (act !== game.wasActive) { gHud.hidden = !act; game.wasActive = act; }
+  let hintText = '';
+  if (act && canThrow()) hintText = '上にはじいて投げる（↑キーでも）';
+  else if (act && C.catcher === blue && (C.phase === 'throw' || C.phase === 'flight')) hintText = 'ボールが来たらタップ（スペースキーでも）';
+  if (hintText !== game.hintText) { game.hintText = hintText; gHint.textContent = hintText; gHint.hidden = !hintText; }
+  // タイミングの輪：届く瞬間に内側の輪と重なる
+  const u = C.phase === 'flight' ? C.ft / C.T : 0;
+  if (!(act && C.phase === 'flight' && C.catcher === blue && C.playerTapT == null && u > 0.3)) { if (!ringEl.hidden) ringEl.hidden = true; return; }
+  ringV.copy(C.target).project(camera);
+  if (ringV.z > 1) { ringEl.hidden = true; return; }
+  ringEl.hidden = false;
+  ringEl.style.transform = `translate(${((ringV.x * 0.5 + 0.5) * window.innerWidth).toFixed(1)}px, ${((-ringV.y * 0.5 + 0.5) * window.innerHeight).toFixed(1)}px)`;
+  ringI.style.setProperty('--s', (0.31 + 1.6 * (1 - u) / 0.7).toFixed(3));
+}
+window.addEventListener('keydown', e => {
+  if (e.target && e.target.closest && e.target.closest('button')) return;
+  if (e.code === 'Space') { if (tryCatchTap()) e.preventDefault(); }
+  else if (e.code === 'ArrowUp' && canThrow()) { e.preventDefault(); playerThrow(rand(-0.06, 0.06), 2.2 + rand(-0.5, 0.5)); }
+});
+
 // ドラッグ・ホイール・ピンチ
 const pointers = new Map();
 let pinch0 = 0, r0 = 0;
 stage.addEventListener('pointerdown', e => {
   stage.setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now() });
+  if (pointers.size === 1) tryCatchTap();
   if (pointers.size === 2) { if (cam.mode !== 'free') setCam('free'); const [a, b] = [...pointers.values()]; pinch0 = Math.hypot(a.x - b.x, a.y - b.y); r0 = cam.free.r; }
   hideHint();
 });
 stage.addEventListener('pointermove', e => {
   const p = pointers.get(e.pointerId); if (!p) return;
+  if (pointers.size === 1 && canThrow()) {
+    // 上にはじく途中はカメラを回さない
+    const ddx = e.clientX - p.sx, ddy = e.clientY - p.sy;
+    if (ddy < 0 && -ddy > Math.abs(ddx) * 0.7) { p.x = e.clientX; p.y = e.clientY; return; }
+  }
   if (cam.mode !== 'free') {
     // タップだけなら表示を戻すだけ。少し動かしたら自由視点にする
     if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) < 8) return;
@@ -1459,6 +1595,14 @@ stage.addEventListener('pointermove', e => {
   }
   p.x = e.clientX; p.y = e.clientY;
   if (pointers.size === 2) { const [a, b] = [...pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); if (pinch0 > 0) cam.free.r = clamp(r0 * pinch0 / d, 3, 60); }
+});
+stage.addEventListener('pointerup', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p || pointers.size !== 1 || !canThrow()) return;
+  const ddx = e.clientX - p.sx, ddy = e.clientY - p.sy, ms = performance.now() - p.t;
+  if (ddy < -30 && -ddy > Math.abs(ddx) * 0.7 && ms < 800) {
+    playerThrow(clamp(ddx / (window.innerWidth * 0.5), -1, 1), (-ddy / window.innerHeight) / Math.max(ms, 30) * 1000);
+  }
 });
 ['pointerup', 'pointercancel'].forEach(n => stage.addEventListener(n, e => { pointers.delete(e.pointerId); pinch0 = 0; }));
 stage.addEventListener('wheel', e => {
@@ -1648,12 +1792,13 @@ function loop() {
   skyCheck += raw; if (skyCheck > 30) { skyCheck = 0; labelSky(); }
   applyTod(raw, false);
   updateCamera(raw, simT);
+  updateGameUI();
   ambient(raw, simT);
 
   if (!playPanel.hidden) idle = 0;
   idle += raw; if (idle > 5 && !document.body.classList.contains('calm')) document.body.classList.add('calm');
   renderer.render(scene, camera);
-  if (++frames >= 3 && (modelsReady >= modelsWanted || simT > 20) && !loadDone) { loadDone = true; document.getElementById('loading').classList.add('done'); }
+  if (++frames >= 3 && ((modelsReady >= modelsWanted && texPending === 0) || simT > 20) && !loadDone) { loadDone = true; document.getElementById('loading').classList.add('done'); }
 }
 loop();
 })();
