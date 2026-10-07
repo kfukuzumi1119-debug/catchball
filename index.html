@@ -128,13 +128,14 @@
 <div id="playPanel" class="ui panel" hidden>
   <div><p class="panel-h">投げ方</p><div class="chips" id="styleChips"></div></div>
   <div><p class="panel-h">ふたりの距離</p><div class="chips" id="distChips"></div></div>
+  <div><p class="panel-h">ゲームの難しさ</p><div class="chips" id="diffChips"></div></div>
 </div>
 <div class="ui bottom">
   <div class="cams" id="cams"></div>
 </div>
 <div id="shot"></div>
 <div id="hint">青にボールが来たらタップでキャッチ ・ 青が持っているときは上にはじいて投げる<br>ドラッグで好きな角度に</div>
-<div id="gameHud" hidden>あそび中 ・ 得点 <b id="gScore">0</b> ・ 最高 <span id="gBest">0</span></div>
+<div id="gameHud" hidden>あそび中 ・ <span id="gLevel">レベル1</span> ・ 得点 <b id="gScore">0</b> ・ 最高 <span id="gBest">0</span></div>
 <div id="judge" aria-live="polite"></div>
 <div id="gameHint" hidden></div>
 <div id="ring" hidden><i></i></div>
@@ -1158,15 +1159,16 @@ function planFromPlayer(lat, y) {
   const ca = C.catcher, th = C.thrower;
   const { f, left } = frame(ca, th);
   C.tMul = 1; C.strike = false;
-  if (Math.abs(lat) <= 1.0 && y >= 0.5 && y <= 2.2) {
-    C.kind = 'catch'; C.willCatch = true; C.strike = Math.abs(lat) < 0.35 && Math.abs(y - 1.35) < 0.3;
-    C.side.copy(ca.home).addScaledVector(left, clamp(lat * 0.6, -0.55, 0.55));
+  const tol = tune().tol, yLo = 1.35 - 0.85 * tol, yHi = 1.35 + 0.85 * tol;
+  if (Math.abs(lat) <= tol && y >= yLo && y <= yHi) {
+    C.kind = 'catch'; C.willCatch = true; C.strike = Math.abs(lat) < 0.35 * tol && Math.abs(y - 1.35) < 0.3 * tol;
+    C.side.copy(ca.home).addScaledVector(left, clamp(lat * 0.6, -0.8, 0.8));
     C.target.copy(ca.home).addScaledVector(left, lat).addScaledVector(f, 0.45); C.target.y = y;
-  } else if (y < 0.5) {
+  } else if (y < yLo) {
     C.kind = 'short'; C.willCatch = false;
-    C.target.copy(ca.home).addScaledVector(f, clamp(1.5 + (0.5 - y) * 3, 1.5, 6)).addScaledVector(left, lat); C.target.y = BALL_R;
+    C.target.copy(ca.home).addScaledVector(f, clamp(1.5 + (yLo - y) * 3, 1.5, 6)).addScaledVector(left, lat); C.target.y = BALL_R;
     C.side.copy(ca.home).addScaledVector(f, 0.3);
-  } else if (y > 2.2) {
+  } else if (y > yHi) {
     C.kind = 'high'; C.willCatch = false; C.tMul = 1.1;
     C.target.copy(ca.home).addScaledVector(left, lat); C.target.y = Math.min(y + 0.6, 4.2);
     C.side.copy(ca.home);
@@ -1181,7 +1183,8 @@ function release() {
   holdPoint(C.thrower, 'hand', C.p0);
   const dist = C.p0.distanceTo(C.target);
   const v = (13 + DIST * 0.35) * C.thrower.throwKeys.speed;   // 距離が長いほど強く投げる
-  C.T = (dist / v + 0.08) * C.tMul;
+  const vg = C.catcher === blue && gameActive() ? tune().speed : 1;   // 遊んでいる間は、レベルで青へのボールが速くなる
+  C.T = (dist / (v * vg) + 0.08) * C.tMul;
   // p(t) = p0 + v t + g t^2 / 2 が T 秒後に target を通る
   C.v0.copy(C.target).sub(C.p0).addScaledVector(GRAV, -0.5 * C.T * C.T).divideScalar(C.T);
   C.ft = 0; C.phase = 'flight';
@@ -1256,17 +1259,18 @@ function step(dt) {
         let caught = C.willCatch;
         if (ca === blue && (gameActive() || C.playerTapT != null)) {
           const tap = C.playerTapT;
+          const tn = tune();
           if (!C.willCatch) { if (tap != null) judge('とどかない…'); }
-          else if (tap == null) { caught = false; judge('見送り'); }
+          else if (tap == null) { caught = false; failure('見送り'); }
           else {
             const early = C.T - tap;   // 届く何秒前にタップしたか
-            if (early <= 0.15) { judge('ナイスキャッチ！ +2'); addScore(2); }
-            else if (early <= 0.32) { judge('キャッチ +1'); addScore(1); }
-            else { caught = false; C.fumble = true; judge('早い！'); }
+            if (early <= tn.perfect) success(2, 'ナイスキャッチ！');
+            else if (early <= tn.good) success(1, 'キャッチ');
+            else { caught = false; C.fumble = true; failure('早い！'); }
           }
         } else if (C.fromPlayer && ca === yellow) {
-          if (caught) { judge(C.strike ? 'ストライク！ +3' : 'ナイスボール +1'); addScore(C.strike ? 3 : 1); }
-          else judge(C.kind === 'high' ? '高すぎ！' : C.kind === 'short' ? 'ワンバウンド' : 'それた…');
+          if (caught) success(C.strike ? 3 : 1, C.strike ? 'ストライク！' : 'ナイスボール');
+          else failure(C.kind === 'high' ? '高すぎ！' : C.kind === 'short' ? 'ワンバウンド' : 'それた…');
         }
         if (caught) {
           attachBall(ca, 'glove'); C.phase = 'caught'; C.t = 0;
@@ -1509,16 +1513,31 @@ function updateCamera(dt, t) {
 }
 
 // ---------- ゲーム（青になって、捕る・投げる） ----------
-const game = { last: -1e9, score: 0, best: 0, pending: null, wasActive: false, hintText: '' };
-try { game.best = +localStorage.getItem('catchball.gameBest') || 0; } catch (e) {}
-const gHud = document.getElementById('gameHud'), gScore = document.getElementById('gScore'), gBest = document.getElementById('gBest');
+const game = { last: -1e9, score: 0, best: 0, pending: null, wasActive: false, hintText: '', level: 1, ok: 0, ng: 0 };
+const DIFF_LEVEL = { easy: 2, normal: 4, hard: 7 };   // 「だんだん上がる」は game.level（1〜10）
+let diffMode = 'up';
+try { const dm = localStorage.getItem('catchball.diff'); if (dm === 'up' || DIFF_LEVEL[dm]) diffMode = dm; } catch (e) {}
+const level = () => diffMode === 'up' ? game.level : DIFF_LEVEL[diffMode];
+const mix = (a, b, t) => a + (b - a) * t;
+// レベルに合わせた調整：判定の幅（秒）、ボールの速さ、捕れる範囲、強さの効き方、輪の見え方、点の倍率
+function tune() {
+  const t = (level() - 1) / 9;
+  return { perfect: mix(0.22, 0.08, t), good: mix(0.45, 0.18, t), speed: mix(0.85, 1.35, t), tol: mix(1.3, 0.6, t),
+           sens: mix(0.7, 1.3, t), ring: t < 0.6 ? 1 : Math.max(0, 1 - (t - 0.6) / 0.25), mult: Math.ceil(level() / 3) };
+}
+function loadBest() { try { game.best = +localStorage.getItem('catchball.gameBest.' + diffMode) || 0; } catch (e) { game.best = 0; } }
+loadBest();
+const gHud = document.getElementById('gameHud'), gScore = document.getElementById('gScore'), gBest = document.getElementById('gBest'), gLevel = document.getElementById('gLevel');
+function showLevel() { gLevel.textContent = 'レベル' + level(); }
+showLevel();
 const judgeEl = document.getElementById('judge'), gHint = document.getElementById('gameHint');
 const ringEl = document.getElementById('ring'), ringI = ringEl.querySelector('i'), ringV = new V3();
 gBest.textContent = game.best;
 const nowS = () => performance.now() / 1000;
 function gameActive() { return nowS() - game.last < 40; }   // 40秒なにもしなければ、眺めるだけに戻る
+function resetGame() { game.score = 0; gScore.textContent = 0; game.level = 1; game.ok = 0; game.ng = 0; showLevel(); }
 function touchGame() {
-  if (!gameActive()) { game.score = 0; gScore.textContent = 0; flashShot('青になって遊べます'); }
+  if (!gameActive()) { resetGame(); flashShot('青になって遊べます'); }
   game.last = nowS();
 }
 let judgeTimer;
@@ -1528,7 +1547,22 @@ function judge(text) {
 }
 function addScore(n) {
   game.score += n; gScore.textContent = game.score;
-  if (game.score > game.best) { game.best = game.score; gBest.textContent = game.best; try { localStorage.setItem('catchball.gameBest', game.best); } catch (e) {} }
+  if (game.score > game.best) { game.best = game.score; gBest.textContent = game.best; try { localStorage.setItem('catchball.gameBest.' + diffMode, game.best); } catch (e) {} }
+}
+// 成功：点を足し、「だんだん上がる」なら3回ごとにレベルを上げる
+function success(base, label) {
+  const pts = base * tune().mult;
+  addScore(pts); judge(`${label} +${pts}`);
+  if (diffMode !== 'up') return;
+  game.ng = 0;
+  if (++game.ok >= 3 && game.level < 10) { game.ok = 0; game.level++; showLevel(); setTimeout(() => judge(`レベル${game.level}に上がった！`), 1000); }
+}
+// 失敗：2回続いたらレベルを1つ下げる
+function failure(label) {
+  judge(label);
+  if (diffMode !== 'up') return;
+  game.ok = 0;
+  if (++game.ng >= 2 && game.level > 1) { game.ng = 0; game.level--; showLevel(); setTimeout(() => judge(`レベル${game.level}に下がった`), 1000); }
 }
 function canThrow() { return C.thrower === blue && C.phase === 'hold' && blue.mode !== 'throw' && !game.pending; }
 function tryCatchTap() {
@@ -1542,8 +1576,9 @@ function playerThrow(dxN, vn) {
   camera.getWorldDirection(_d);
   const rx = -_d.z, rz = _d.x, rl = Math.hypot(rx, rz) || 1;   // 画面の右方向（地面の上）
   const { left } = frame(yellow, blue);
-  const side = (rx * left.x + rz * left.z) / rl;
-  game.pending = { lat: dxN * 3.2 * side, y: 1.35 + (vn - 2.2) * 0.9 };
+  // 画面の右が相手の左右どちらに当たるか（真横から見ているときは、青のうしろから見たときと同じ向きにする）
+  const sd = (rx * left.x + rz * left.z) / rl, side = Math.abs(sd) < 0.3 ? 1 : Math.sign(sd);
+  game.pending = { lat: dxN * 3.2 * side, y: 1.35 + (vn - 2.2) * 0.9 * tune().sens };
 }
 function updateGameUI() {
   const act = gameActive();
@@ -1551,13 +1586,16 @@ function updateGameUI() {
   let hintText = '';
   if (act && canThrow()) hintText = '上にはじいて投げる（↑キーでも）';
   else if (act && C.catcher === blue && (C.phase === 'throw' || C.phase === 'flight')) hintText = 'ボールが来たらタップ（スペースキーでも）';
+  if (!playPanel.hidden) hintText = '';   // 設定を開いている間は案内を出さない
   if (hintText !== game.hintText) { game.hintText = hintText; gHint.textContent = hintText; gHint.hidden = !hintText; }
   // タイミングの輪：届く瞬間に内側の輪と重なる
   const u = C.phase === 'flight' ? C.ft / C.T : 0;
   if (!(act && C.phase === 'flight' && C.catcher === blue && C.playerTapT == null && u > 0.3)) { if (!ringEl.hidden) ringEl.hidden = true; return; }
   ringV.copy(C.target).project(camera);
   if (ringV.z > 1) { ringEl.hidden = true; return; }
-  ringEl.hidden = false;
+  const ra = tune().ring;
+  if (ra <= 0) { ringEl.hidden = true; return; }
+  ringEl.hidden = false; ringEl.style.opacity = ra.toFixed(2);
   ringEl.style.transform = `translate(${((ringV.x * 0.5 + 0.5) * window.innerWidth).toFixed(1)}px, ${((-ringV.y * 0.5 + 0.5) * window.innerHeight).toFixed(1)}px)`;
   ringI.style.setProperty('--s', (0.31 + 1.6 * (1 - u) / 0.7).toFixed(3));
 }
@@ -1736,6 +1774,11 @@ chipGroup(document.getElementById('styleChips'), STYLE_OPTS, SETTINGS.style, v =
 chipGroup(document.getElementById('distChips'), DIST_OPTS, SETTINGS.dist, v => {
   SETTINGS.dist = v; try { localStorage.setItem('catchball.dist', v); } catch (e) {}
   setDistance(v, false); flashShot(`ふたりの距離を${v}mにします`);
+});
+chipGroup(document.getElementById('diffChips'), [['easy', 'やさしい'], ['normal', 'ふつう'], ['hard', 'むずかしい'], ['up', 'だんだん上がる', 'うまくいくと上がる']], diffMode, v => {
+  diffMode = v; try { localStorage.setItem('catchball.diff', v); } catch (e) {}
+  resetGame(); loadBest(); gBest.textContent = game.best;
+  flashShot(v === 'up' ? 'レベル1から、だんだん難しくなります' : 'ゲームの難しさ：' + { easy: 'やさしい', normal: 'ふつう', hard: 'むずかしい' }[v]);
 });
 btnPlay.addEventListener('click', () => {
   playPanel.hidden = !playPanel.hidden;
